@@ -6,9 +6,13 @@ __pycache__/
 # Application runtime logs and reports
 logs/*.log
 reports/*.txt
+reports/*.docx
 data/*.db
 data/quarantine/*
 vault/
+
+# Repomix codebase packaging
+repomix*
 
 # Packaging & compiler artifacts
 build/

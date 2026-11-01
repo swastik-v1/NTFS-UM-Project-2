@@ -90,10 +90,8 @@ A Python-based Blue Team security tool designed to monitor filesystem activity i
 │   └── static/style.css      # Dark-mode dashboard stylesheet
 ├── logs/                     # Audit & alert logs (audit.log, alerts.log)
 ├── reports/                  # Generated summary and violation reports
-├── tests/                    # Automated test suite (43 unit & integration tests)
-├── requirements.txt          # Python dependencies
-├── repomix.config.json       # Repomix configuration
-└── repomix-output.xml        # Single-file packed codebase representation
+├── tests/                    # Automated test suite (73 unit & integration tests)
+└── requirements.txt          # Python dependencies
 ```
 
 ---
