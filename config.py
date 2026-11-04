@@ -94,15 +94,44 @@ SENSITIVE_DIRECTORIES = [
 ]
 
 # =============================================================================
-# IGNORED FILES & SYSTEM NOISE
+# IGNORED FILES & SYSTEM NOISE (Vendor-neutral, Production-grade Defaults)
 # =============================================================================
 IGNORED_EXTENSIONS = [
     ".tmp", ".crdownload", ".part", ".lock", ".swp",
+    # Common container formats for large streaming asset archives
+    ".pak", ".assets", ".ress", ".bundle", ".blk", ".vpk", ".wad",
+    ".pck", ".resource", ".manifest", ".chunk", ".sharedassets",
 ]
 
 IGNORED_FILENAMES = [
     "desktop.ini", "thumbs.db", ".ds_store",
 ]
+
+# Standard vendor-neutral directory patterns to exclude from recursive monitoring.
+# Machine-specific paths can be added dynamically via config.json or the Web UI.
+DEFAULT_IGNORED_DIRECTORY_KEYWORDS = [
+    "SteamLibrary", "steamapps", "Saved Games", "My Games",
+    "ShaderCache", "shadercache", "UnityCrashHandler",
+]
+IGNORED_DIRECTORY_KEYWORDS = list(DEFAULT_IGNORED_DIRECTORY_KEYWORDS)
+
+# Standard background updater / launcher binaries that generate continuous asset write streams.
+# Any custom process can be added via config.json or the Web UI exclusions panel.
+DEFAULT_IGNORED_PROCESSES = [
+    "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe",
+    "galaxyclient.exe", "battle.net.exe", "riotclientservices.exe",
+]
+IGNORED_GAME_PROCESSES = list(DEFAULT_IGNORED_PROCESSES)
+
+# =============================================================================
+# ADAPTIVE EVENT STORM SUPPRESSION (Enterprise High-Velocity Noise Defense)
+# =============================================================================
+# Automatically suppresses high-frequency non-sensitive write bursts from ANY process
+# (games, compilers, sync clients, 3D renderers) across all client installations
+STORM_SUPPRESSION_ENABLED   = True
+STORM_BURST_THRESHOLD       = 25     # Max non-sensitive events allowed within rolling window
+STORM_WINDOW_SECONDS        = 2.0    # Rolling window (seconds) to detect high write velocity
+STORM_COOLDOWN_SECONDS      = 8.0    # Duration of suppression after threshold breach
 
 # =============================================================================
 # SUSPICIOUS DESTINATIONS
@@ -176,3 +205,32 @@ LOGS_PER_PAGE       = 50
 # PROCESS TRACKING
 # =============================================================================
 ENABLE_PROCESS_TRACKING = True
+
+# =============================================================================
+# EXTERNAL CONFIGURATION LOADER (config.json Support for Portable & MSI Deployments)
+# =============================================================================
+CONFIG_JSON_PATH = os.path.join(BASE_DIR, "config.json")
+
+
+def load_external_config() -> dict:
+    """Load user or enterprise overrides from config.json if present."""
+    import json
+    if not os.path.exists(CONFIG_JSON_PATH):
+        return {}
+    try:
+        with open(CONFIG_JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_external_config(cfg: dict) -> bool:
+    """Save user or enterprise overrides to config.json."""
+    import json
+    try:
+        with open(CONFIG_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except Exception:
+        return False
+

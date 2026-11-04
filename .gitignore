@@ -5,6 +5,7 @@ __pycache__/
 
 # Application runtime logs and reports
 logs/*.log
+logs/*.bak
 reports/*.txt
 reports/*.docx
 data/*.db

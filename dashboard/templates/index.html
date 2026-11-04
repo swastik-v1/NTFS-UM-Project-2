@@ -19,7 +19,7 @@
       <span class="logo-sub">Security Operations</span>
     </div>
     <div class="top-nav-actions">
-      <button class="btn-nav-action" onclick="openDirectoriesModal()" title="Manage Monitored Directories">📁 Monitored Folders</button>
+      <button class="btn-nav-action" onclick="openDirectoriesModal()" title="Manage Monitored Directories and Exclusions">📁 Folders & Exclusions</button>
       <button class="btn-nav-action" onclick="openVaultModal()" title="View Quarantined Files">🛡️ Vault</button>
     </div>
     <div class="status-area">
@@ -36,7 +36,10 @@
   <!-- ─── LEFT SIDEBAR: Alerts ─── -->
   <aside class="sidebar">
     <div class="sidebar-header">
-      <span>🚨 Live Alerts</span>
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span>🚨 Live Alerts</span>
+        <span style="font-size: 10px; font-weight: normal; color: var(--text-muted, #94a3b8); text-transform: none;">Warnings & Critical Alerts</span>
+      </div>
       <span class="badge" id="alertCount">0</span>
     </div>
     <div class="alert-feed" id="alertFeed">
@@ -115,6 +118,14 @@
         <option value="WARNING">WARNING</option>
         <option value="CRITICAL">CRITICAL</option>
       </select>
+      <select id="eventFilter" class="filter-select" title="Filter by event action">
+        <option value="">All Actions</option>
+        <option value="CREATED">CREATED</option>
+        <option value="MODIFIED">MODIFIED</option>
+        <option value="MOVED">MOVED / RENAMED</option>
+        <option value="DELETED">DELETED</option>
+        <option value="DOWNLOADED">DOWNLOADED</option>
+      </select>
       <select id="fileTypeFilter" class="filter-select" title="Filter by file type">
         <option value="">All File Types</option>
         <option value="documents">📄 Documents (.docx, .pdf, .xlsx...)</option>
@@ -133,6 +144,7 @@
         <option value="ext_asc">🏷️ File Extension (A-Z)</option>
       </select>
       <button class="btn-refresh" id="btnRefresh" onclick="fetchAll()">↺ Refresh</button>
+      <button class="btn-refresh" id="btnClearLogs" onclick="actionClearLogs()" title="Archive and reset audit logs" style="border-color: #ef4444; color: #ef4444;">🧹 Clear Logs</button>
     </section>
 
     <!-- Log Table -->
@@ -215,6 +227,8 @@
   async function fetchStats() {
     try {
       let url = `/api/stats?timeframe=${encodeURIComponent(activeTimePreset)}`;
+      const eventType = document.getElementById("eventFilter") ? document.getElementById("eventFilter").value : "";
+      if (eventType)       url += `&event_type=${encodeURIComponent(eventType)}`;
       if (activeStartTime) url += `&start_time=${encodeURIComponent(activeStartTime)}`;
       if (activeEndTime)   url += `&end_time=${encodeURIComponent(activeEndTime)}`;
       const res  = await fetch(url);
@@ -314,13 +328,15 @@
 
   // ── Logs ─────────────────────────────────────────────────────────────────
   async function fetchLogs(page = currentPage) {
-    const level    = document.getElementById("levelFilter").value;
-    const fileType = document.getElementById("fileTypeFilter").value;
-    const keyword  = document.getElementById("searchInput").value.trim();
+    const level     = document.getElementById("levelFilter").value;
+    const eventType = document.getElementById("eventFilter") ? document.getElementById("eventFilter").value : "";
+    const fileType  = document.getElementById("fileTypeFilter").value;
+    const keyword   = document.getElementById("searchInput").value.trim();
     let url = `/api/logs?page=${page}&sort_by=${encodeURIComponent(currentSortBy)}&order=${encodeURIComponent(currentOrder)}&timeframe=${encodeURIComponent(activeTimePreset)}`;
-    if (level)    url += `&level=${encodeURIComponent(level)}`;
-    if (fileType) url += `&file_type=${encodeURIComponent(fileType)}`;
-    if (keyword)  url += `&keyword=${encodeURIComponent(keyword)}`;
+    if (level)     url += `&level=${encodeURIComponent(level)}`;
+    if (eventType) url += `&event_type=${encodeURIComponent(eventType)}`;
+    if (fileType)  url += `&file_type=${encodeURIComponent(fileType)}`;
+    if (keyword)   url += `&keyword=${encodeURIComponent(keyword)}`;
     if (activeStartTime) url += `&start_time=${encodeURIComponent(activeStartTime)}`;
     if (activeEndTime)   url += `&end_time=${encodeURIComponent(activeEndTime)}`;
 
@@ -862,6 +878,10 @@
     searchDebounce = setTimeout(() => fetchLogs(1), 400);
   });
   document.getElementById("levelFilter").addEventListener("change", () => fetchLogs(1));
+  document.getElementById("eventFilter").addEventListener("change", () => {
+    fetchStats();
+    fetchLogs(1);
+  });
   document.getElementById("fileTypeFilter").addEventListener("change", () => fetchLogs(1));
 
   // ── Auto-refresh every 5 seconds ──────────────────────────────────────────
@@ -871,6 +891,25 @@
   }
 
   // ── SOC Remediation Handlers ─────────────────────────────────────────────
+  async function actionClearLogs() {
+    if (!confirm("Are you sure you want to archive and reset the current audit logs?\n\nThis will backup existing logs to logs/audit_<timestamp>.log.bak and reset the active log files.")) return;
+    try {
+      const res = await fetch("/api/logs/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert("✓ Audit logs successfully cleared and archived!");
+        fetchAll();
+      } else {
+        alert(`⚠️ Clear logs failed: ${data.error || "Unknown error"}`);
+      }
+    } catch (e) {
+      alert(`⚠️ Clear logs request failed: ${e.message}`);
+    }
+  }
+
   async function actionQuarantine(encodedFilePath) {
     const filePath = decodeURIComponent(encodedFilePath || "");
     if (!filePath || filePath === "—") {
@@ -941,13 +980,15 @@
     }
   }
 
-  // ── Monitored Directories Modal & Browsing Handlers ───────────────────────
-  let browserCurrentDir = "";
-  let browserParentDir  = "";
+  // ── Monitored Directories & Exclusions Modal Handlers ──────────────────
+  let browserCurrentDir    = "";
+  let browserParentDir     = "";
+  let browserTargetInputId = "newDirInput";
+  let currentModalTab      = "monitored";
 
   async function openDirectoriesModal() {
     document.getElementById("dirsModal").style.display = "flex";
-    loadDirectories();
+    switchModalTab(currentModalTab || "monitored");
   }
 
   function closeDirectoriesModal() {
@@ -955,6 +996,33 @@
     document.getElementById("dirsFeedback").style.display = "none";
     const panel = document.getElementById("browserPanel");
     if (panel) panel.style.display = "none";
+  }
+
+  function switchModalTab(tab) {
+    currentModalTab = tab;
+    document.querySelectorAll(".modal-tab").forEach(b => b.classList.remove("active"));
+    const btn = document.getElementById("tabBtn" + tab.charAt(0).toUpperCase() + tab.slice(1));
+    if (btn) btn.classList.add("active");
+
+    const tabMon = document.getElementById("tabContentMonitored");
+    const tabExc = document.getElementById("tabContentExcluded");
+    const tabPrc = document.getElementById("tabContentProcesses");
+    const tabStm = document.getElementById("tabContentStorm");
+
+    if (tabMon) tabMon.style.display = (tab === "monitored") ? "block" : "none";
+    if (tabExc) tabExc.style.display = (tab === "excluded") ? "block" : "none";
+    if (tabPrc) tabPrc.style.display = (tab === "processes") ? "block" : "none";
+    if (tabStm) tabStm.style.display = (tab === "storm") ? "block" : "none";
+
+    const panel = document.getElementById("browserPanel");
+    if (panel) panel.style.display = "none";
+    document.getElementById("dirsFeedback").style.display = "none";
+
+    if (tab === "monitored") {
+      loadDirectories();
+    } else {
+      loadExclusions();
+    }
   }
 
   async function loadDirectories() {
@@ -990,11 +1058,205 @@
     }
   }
 
-  function toggleFolderBrowser() {
+  async function loadExclusions() {
+    try {
+      const res = await fetch("/api/exclusions");
+      const data = await res.json();
+
+      const excDirs = data.directories || [];
+      const internalDirs = data.internal_directories || [];
+      const defKeywords = data.default_directory_keywords || [];
+      const exactDirs = data.system_exact_directories || [];
+
+      // Summary Badge
+      const summaryEl = document.getElementById("excludedSummaryBadge");
+      if (summaryEl) {
+        summaryEl.textContent = `${excDirs.length} Custom • ${internalDirs.length} App Protected • ${exactDirs.length + defKeywords.length} System Patterns`;
+      }
+
+      // 1. Render Custom Excluded Directories
+      const excListEl = document.getElementById("excludedDirsList");
+      if (excListEl) {
+        if (excDirs.length === 0) {
+          excListEl.innerHTML = `<div class="text-muted" style="padding: 10px; font-size: 12px;">No custom excluded directories configured yet. Use the form below to exclude any specific game or data folder.</div>`;
+        } else {
+          excListEl.innerHTML = excDirs.map(d => {
+            const encoded = encodeURIComponent(d);
+            return `
+              <div class="modal-item">
+                <div style="display:flex; flex-direction:column; gap:2px; flex:1; min-width:0;">
+                  <span class="modal-item-path" title="${escapeHtml(d)}">${escapeHtml(d)}</span>
+                  <span class="badge-status inactive" style="font-size:10px;">🚫 User-Excluded from recursive monitoring</span>
+                </div>
+                <button class="btn-item-del" onclick="removeExcludedDirectory('${encoded}')" title="Resume monitoring this folder">🗑️ Remove</button>
+              </div>
+            `;
+          }).join("");
+        }
+      }
+
+      // 2. Render Application Internal Directories (Self-Protection)
+      const internalListEl = document.getElementById("internalDirsList");
+      if (internalListEl) {
+        if (internalDirs.length === 0) {
+          internalListEl.innerHTML = `<div class="text-muted" style="padding: 6px; font-size: 11px;">No internal paths registered.</div>`;
+        } else {
+          internalListEl.innerHTML = internalDirs.map(item => `
+            <div class="modal-item" style="padding: 6px 10px; background: rgba(255,255,255,0.02);">
+              <div style="display:flex; flex-direction:column; gap:2px; flex:1; min-width:0;">
+                <div style="display:flex; align-items:center; gap:6px;">
+                  <span style="font-weight:600; font-size:11.5px; color:var(--text-main);">${escapeHtml(item.name)}</span>
+                  <span class="badge-tag" style="font-size:9.5px; background:rgba(59, 130, 246, 0.15); color:#60a5fa;">Auto-Isolated</span>
+                </div>
+                <span class="modal-item-path mono text-muted" style="font-size:10.5px;" title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</span>
+              </div>
+              <span style="font-size:10px; color:var(--text-muted); font-style:italic;">${escapeHtml(item.purpose)}</span>
+            </div>
+          `).join("");
+        }
+      }
+
+      // 3. Render System & Engine Cache Patterns
+      const defKwEl = document.getElementById("defaultKeywordsList");
+      if (defKwEl) {
+        const exactTags = exactDirs.map(d => `<span class="badge-tag mono" style="margin: 2px; background: rgba(234, 179, 8, 0.12); color: #facc15;" title="Exact system/build folder match">${escapeHtml(d)}</span>`);
+        const kwTags = defKeywords.map(kw => `<span class="badge-tag" style="margin: 2px;" title="Keyword substring match">${escapeHtml(kw)}</span>`);
+        defKwEl.innerHTML = [...exactTags, ...kwTags].join(" ");
+      }
+
+      // 4. Render Excluded Processes
+      const procListEl = document.getElementById("excludedProcessesList");
+      if (procListEl) {
+        const excProcs = data.processes || [];
+        if (excProcs.length === 0) {
+          procListEl.innerHTML = `<div class="text-muted" style="padding: 10px; font-size: 12px;">No custom ignored processes configured.</div>`;
+        } else {
+          procListEl.innerHTML = excProcs.map(p => {
+            const encoded = encodeURIComponent(p);
+            return `
+              <div class="modal-item">
+                <div style="display:flex; flex-direction:column; gap:2px; flex:1; min-width:0;">
+                  <span class="modal-item-path mono">${escapeHtml(p)}</span>
+                  <span class="badge-status inactive" style="font-size:10px;">⚡ High-volume writes suppressed (non-sensitive)</span>
+                </div>
+                <button class="btn-item-del" onclick="removeExcludedProcess('${encoded}')" title="Stop ignoring this process">🗑️ Remove</button>
+              </div>
+            `;
+          }).join("");
+        }
+      }
+
+      // Default Processes
+      const defProcEl = document.getElementById("defaultProcessesList");
+      if (defProcEl && data.default_processes) {
+        defProcEl.innerHTML = data.default_processes.map(dp => `<span class="badge-tag mono" style="margin: 2px;">${escapeHtml(dp)}</span>`).join(" ");
+      }
+    } catch (e) {
+      console.error("Failed to load exclusions:", e);
+    }
+  }
+
+  async function addExcludedDirectory() {
+    const input = document.getElementById("newExcludedDirInput");
+    const dir = input.value.trim();
+    const fb = document.getElementById("dirsFeedback");
+    if (!dir) return;
+    try {
+      const res = await fetch("/api/exclusions/directory/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: dir })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        fb.textContent = `✓ Excluded: ${dir}`;
+        fb.className = "modal-feedback success";
+        input.value = "";
+        const panel = document.getElementById("browserPanel");
+        if (panel) panel.style.display = "none";
+        loadExclusions();
+      } else {
+        fb.textContent = `⚠️ Error: ${data.error || "Could not exclude folder"}`;
+        fb.className = "modal-feedback error";
+      }
+    } catch (e) {
+      fb.textContent = `⚠️ Error: ${e.message}`;
+      fb.className = "modal-feedback error";
+    }
+    fb.style.display = "block";
+  }
+
+  async function removeExcludedDirectory(encodedPath) {
+    const dir = decodeURIComponent(encodedPath);
+    if (!confirm(`Are you sure you want to remove '${dir}' from the exclusion list?`)) return;
+    try {
+      const res = await fetch("/api/exclusions/directory/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: dir })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        loadExclusions();
+      }
+    } catch (e) {
+      alert("Failed to remove exclusion: " + e.message);
+    }
+  }
+
+  async function addExcludedProcess() {
+    const input = document.getElementById("newExcludedProcInput");
+    const proc = input.value.trim();
+    const fb = document.getElementById("dirsFeedback");
+    if (!proc) return;
+    try {
+      const res = await fetch("/api/exclusions/process/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: proc })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        fb.textContent = `✓ Process added to ignore list: ${proc}`;
+        fb.className = "modal-feedback success";
+        input.value = "";
+        loadExclusions();
+      } else {
+        fb.textContent = `⚠️ Error: ${data.error || "Could not add process"}`;
+        fb.className = "modal-feedback error";
+      }
+    } catch (e) {
+      fb.textContent = `⚠️ Error: ${e.message}`;
+      fb.className = "modal-feedback error";
+    }
+    fb.style.display = "block";
+  }
+
+  async function removeExcludedProcess(encodedName) {
+    const proc = decodeURIComponent(encodedName);
+    if (!confirm(`Are you sure you want to stop ignoring '${proc}'?`)) return;
+    try {
+      const res = await fetch("/api/exclusions/process/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: proc })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        loadExclusions();
+      }
+    } catch (e) {
+      alert("Failed to remove process: " + e.message);
+    }
+  }
+
+  function toggleFolderBrowser(targetInputId = "newDirInput") {
+    browserTargetInputId = targetInputId;
     const panel = document.getElementById("browserPanel");
     if (panel.style.display === "none" || !panel.style.display) {
       panel.style.display = "flex";
-      const existing = document.getElementById("newDirInput").value.trim();
+      const targetEl = document.getElementById(browserTargetInputId);
+      const existing = targetEl ? targetEl.value.trim() : "";
       browseDirectory(existing || "");
     } else {
       panel.style.display = "none";
@@ -1109,7 +1371,8 @@
 
   function selectCurrentBrowserFolder() {
     if (!browserCurrentDir) return;
-    document.getElementById("newDirInput").value = browserCurrentDir;
+    const targetEl = document.getElementById(browserTargetInputId) || document.getElementById("newDirInput");
+    if (targetEl) targetEl.value = browserCurrentDir;
     document.getElementById("browserPanel").style.display = "none";
   }
 
@@ -1173,14 +1436,97 @@
   }
 
   async function openVaultInExplorer() {
+    const btn = document.getElementById("btnOpenVaultExplorer");
+    const fb = document.getElementById("vaultFeedback");
     try {
+      if (btn) btn.textContent = "⏳ Launching…";
       const res = await fetch("/api/quarantine/open-folder", { method: "POST" });
       const data = await res.json();
-      if (!data.success) {
+      if (res.ok && data.success) {
+        if (btn) {
+          btn.textContent = "✓ Explorer Opened!";
+          setTimeout(() => { if (btn) btn.textContent = "📂 Open in Explorer"; }, 3500);
+        }
+        if (fb) {
+          fb.style.display = "block";
+          fb.style.background = "rgba(74, 222, 128, 0.12)";
+          fb.style.color = "#4ade80";
+          fb.style.borderColor = "rgba(74, 222, 128, 0.3)";
+          fb.innerHTML = `✓ Opened folder in Windows File Explorer:<br><span class="mono" style="font-size:10.5px; word-break:break-all;">${escapeHtml(data.path || "")}</span>`;
+          setTimeout(() => { if (fb) fb.style.display = "none"; }, 6000);
+        }
+      } else {
+        if (btn) btn.textContent = "📂 Open in Explorer";
         alert("Could not open folder in Explorer: " + (data.error || "Unknown error"));
       }
     } catch (e) {
+      if (btn) btn.textContent = "📂 Open in Explorer";
       alert("Request failed: " + e.message);
+    }
+  }
+
+  function copyVaultPath() {
+    const dirEl = document.getElementById("vaultDirPath");
+    const pathText = dirEl ? dirEl.textContent.trim() : "";
+    if (!pathText || pathText.includes("Loading")) return;
+    navigator.clipboard.writeText(pathText);
+    const fb = document.getElementById("vaultFeedback");
+    if (fb) {
+      fb.style.display = "block";
+      fb.style.background = "rgba(74, 222, 128, 0.12)";
+      fb.style.color = "#4ade80";
+      fb.style.borderColor = "rgba(74, 222, 128, 0.3)";
+      fb.textContent = `✓ Copied vault path to clipboard: ${pathText}`;
+      setTimeout(() => { if (fb) fb.style.display = "none"; }, 4000);
+    } else {
+      alert("✓ Copied vault path to clipboard:\n" + pathText);
+    }
+  }
+
+  async function toggleVaultBrowser() {
+    const panel = document.getElementById("vaultBrowserPanel");
+    if (!panel) return;
+    if (panel.style.display === "none" || !panel.style.display) {
+      panel.style.display = "block";
+      const dirEl = document.getElementById("vaultDirPath");
+      const vaultPath = dirEl ? dirEl.textContent.trim() : "";
+      await browseVaultDirectory(vaultPath);
+    } else {
+      panel.style.display = "none";
+    }
+  }
+
+  async function browseVaultDirectory(path) {
+    const listEl = document.getElementById("vaultBrowserList");
+    const countEl = document.getElementById("vaultBrowserCount");
+    if (!listEl) return;
+    listEl.innerHTML = `<div class="text-muted" style="padding:6px; font-size:11px;">Scanning vault directory…</div>`;
+    try {
+      const url = path ? `/api/browse-directory?path=${encodeURIComponent(path)}` : `/api/browse-directory`;
+      const res = await fetch(url);
+      const data = await res.json();
+      const files = data.files || [];
+      const folders = data.folders || [];
+      if (countEl) countEl.textContent = `${files.length} file(s), ${folders.length} folder(s)`;
+      if (files.length === 0 && folders.length === 0) {
+        listEl.innerHTML = `<div class="text-muted" style="padding:10px; font-size:11px; text-align:center;">No files currently in vault folder.</div>`;
+        return;
+      }
+      let html = "";
+      files.forEach(f => {
+        html += `
+          <div class="browser-file-item" title="${escapeHtml(f.path)}">
+            <div class="browser-file-left">
+              <span>🔒</span>
+              <span class="mono browser-file-name" style="font-size:11px;">${escapeHtml(f.name)}</span>
+            </div>
+            <span class="browser-file-size">${formatBytes(f.size)}</span>
+          </div>
+        `;
+      });
+      listEl.innerHTML = html;
+    } catch (e) {
+      listEl.innerHTML = `<div class="text-crit" style="padding:6px; font-size:11px;">Error browsing vault: ${escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -1265,14 +1611,24 @@
 </script>
 
 <!-- ═════════════════════════════ MODALS ══════════════════════════════════ -->
-<!-- Monitored Directories Modal -->
+<!-- Monitored Directories & Exclusions Modal -->
 <div class="modal-backdrop" id="dirsModal" style="display: none;" onclick="if(event.target===this) closeDirectoriesModal()">
-  <div class="modal-box" style="width: 620px;">
+  <div class="modal-box" style="width: 660px;">
     <div class="modal-header">
-      <div class="modal-title">📁 Manage Monitored Directories</div>
+      <div class="modal-title">⚙️ Monitoring Scope & Exclusion Settings</div>
       <button class="modal-close" onclick="closeDirectoriesModal()">✕</button>
     </div>
-    <div class="modal-body">
+
+    <!-- Modal Tabs -->
+    <div class="modal-tabs">
+      <button class="modal-tab active" id="tabBtnMonitored" type="button" onclick="switchModalTab('monitored')">📁 Monitored Folders</button>
+      <button class="modal-tab" id="tabBtnExcluded" type="button" onclick="switchModalTab('excluded')">🚫 Excluded Folders</button>
+      <button class="modal-tab" id="tabBtnProcesses" type="button" onclick="switchModalTab('processes')">⚙️ Process Rules</button>
+      <button class="modal-tab" id="tabBtnStorm" type="button" onclick="switchModalTab('storm')">⚡ Storm Defense</button>
+    </div>
+
+    <!-- Tab 1: Monitored Folders -->
+    <div class="modal-body" id="tabContentMonitored">
       <div class="modal-section-title">Active Monitored Directories</div>
       <div class="modal-list" id="dirsList">
         <div class="text-muted">Loading monitored directories…</div>
@@ -1281,31 +1637,111 @@
       <div class="modal-section-title" style="margin-top: 14px;">Add New Monitored Directory</div>
       <div class="modal-add-form">
         <input type="text" id="newDirInput" class="modal-input" placeholder="Type path or click Browse below..." />
-        <button class="btn-modal-browse" type="button" onclick="toggleFolderBrowser()">📁 Browse...</button>
+        <button class="btn-modal-browse" type="button" onclick="toggleFolderBrowser('newDirInput')">📁 Browse...</button>
         <button class="btn-modal-add" type="button" onclick="addDirectory()">➕ Add Folder</button>
       </div>
+    </div>
 
-      <!-- Interactive Folder Browser Drawer / Panel -->
-      <div id="browserPanel" class="browser-panel" style="display: none;">
-        <div class="browser-header">
-          <span class="browser-title">📂 Folder Browser</span>
-          <button class="btn-browser-nav" id="browserUpBtn" type="button" onclick="navigateBrowserUp()" title="Go to parent directory">⬆️ Up</button>
-        </div>
-        <div class="browser-current-path mono" id="browserCurrentPath">Select a drive or quick folder</div>
-        
-        <!-- Quick Picks: Drives & User Folders -->
-        <div class="browser-quick-bar" id="browserQuickBar"></div>
+    <!-- Tab 2: Excluded Folders -->
+    <div class="modal-body" id="tabContentExcluded" style="display: none;">
+      <!-- Exclusions Overview Header -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+        <div class="modal-section-title">Directory Exclusion Inventory</div>
+        <div id="excludedSummaryBadge" style="font-size: 11px; color: var(--text-muted); font-weight: 500;">Loading summary…</div>
+      </div>
+      <p style="font-size: 11px; color: var(--text-muted); margin: 0 0 8px 0; line-height: 1.4;">
+        Files within these directories are bypassed during real-time monitoring and baseline hashing, eliminating noise and preventing OS buffer exhaustion.
+      </p>
 
-        <!-- Subfolders List -->
-        <div class="browser-subfolder-list" id="browserSubfolders"></div>
-
-        <div class="browser-footer">
-          <button class="btn-use-folder" id="btnUseFolder" type="button" onclick="selectCurrentBrowserFolder()">✓ Use This Folder</button>
-        </div>
+      <!-- 1. Custom Excluded Directories -->
+      <div class="modal-section-title" style="margin-top: 4px;">User-Configured Excluded Folders</div>
+      <div class="modal-list" id="excludedDirsList">
+        <div class="text-muted">Loading excluded directories…</div>
       </div>
 
-      <div class="modal-feedback" id="dirsFeedback"></div>
+      <!-- Add New Excluded Folder Form -->
+      <div class="modal-section-title" style="margin-top: 12px;">Add New Folder to Exclude</div>
+      <div class="modal-add-form">
+        <input type="text" id="newExcludedDirInput" class="modal-input" placeholder="Type folder path or click Browse below (e.g. D:\SteamLibrary, E:\Games)..." />
+        <button class="btn-modal-browse" type="button" onclick="toggleFolderBrowser('newExcludedDirInput')">📁 Browse...</button>
+        <button class="btn-modal-add" type="button" onclick="addExcludedDirectory()">➕ Exclude Folder</button>
+      </div>
+
+      <!-- 2. Application Internal Directories (Self-Isolation) -->
+      <div class="modal-section-title" style="margin-top: 14px;">Application Internal Directories (Self-Protection)</div>
+      <div class="modal-list" id="internalDirsList" style="max-height: 140px;">
+        <div class="text-muted">Loading internal paths…</div>
+      </div>
+
+      <!-- 3. System & Development Directory Patterns -->
+      <div class="modal-section-title" style="margin-top: 14px;">System, Build & Digital Library Patterns</div>
+      <div id="defaultKeywordsList" style="font-size: 11px; color: var(--text-muted); line-height: 1.6; padding: 4px 0; display: flex; flex-wrap: wrap; gap: 4px;"></div>
     </div>
+
+    <!-- Tab 3: Process Rules -->
+    <div class="modal-body" id="tabContentProcesses" style="display: none;">
+      <div class="modal-section-title">Custom Ignored Processes</div>
+      <div class="modal-list" id="excludedProcessesList">
+        <div class="text-muted">Loading excluded processes…</div>
+      </div>
+
+      <div class="modal-section-title" style="margin-top: 14px;">Add Process to Ignore (Non-sensitive files only)</div>
+      <div class="modal-add-form">
+        <input type="text" id="newExcludedProcInput" class="modal-input" placeholder="e.g. custom_daemon.exe" />
+        <button class="btn-modal-add" type="button" onclick="addExcludedProcess()">➕ Add Process</button>
+      </div>
+
+      <div class="modal-section-title" style="margin-top: 14px;">Default Ignored Background Daemons</div>
+      <div id="defaultProcessesList" style="font-size: 11px; color: var(--text-muted); line-height: 1.6; padding: 4px 0;"></div>
+    </div>
+
+    <!-- Tab 4: Adaptive Storm Defense -->
+    <div class="modal-body" id="tabContentStorm" style="display: none;">
+      <div class="modal-section-title">Universal Noise Suppression Engine</div>
+      <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 12px;">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <span style="font-size: 16px;">🛡️</span>
+          <strong style="color: #4ade80;">Active & Operating</strong>
+          <span class="badge-tag" style="background: rgba(74, 222, 128, 0.15); color: #4ade80;">Zero Blindspot</span>
+        </div>
+        <p style="font-size: 11.5px; color: var(--text-muted); margin: 0 0 10px 0; line-height: 1.5;">
+          The Adaptive Storm Suppressor dynamically monitors event velocity across all folders and processes. When high-volume background activity (game updates, code compiles, cloud syncing) exceeds <strong>25 writes per 2 seconds</strong>, non-sensitive spam is automatically throttled to prevent OS buffer starvation.
+        </p>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px;">
+          <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px;">
+            <span style="color: var(--text-muted);">Burst Threshold:</span> <strong>25 events / 2s</strong>
+          </div>
+          <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px;">
+            <span style="color: var(--text-muted);">Cooldown Window:</span> <strong>8 seconds</strong>
+          </div>
+        </div>
+      </div>
+      <div style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 6px; padding: 10px; font-size: 11px; color: #fca5a5; line-height: 1.4;">
+        🔒 <strong>Security Guarantee:</strong> Restricted data files (<code>.docx</code>, <code>.xlsx</code>, <code>.pem</code>, <code>.key</code>, <code>.env</code>, <code>.sql</code>, DLP triggers, USB/Cloud copies) completely bypass suppression and are always cataloged and alerted.
+      </div>
+    </div>
+
+    <!-- Interactive Folder Browser Drawer / Panel (Shared across tabs) -->
+    <div id="browserPanel" class="browser-panel" style="display: none; margin: 0 18px 12px;">
+      <div class="browser-header">
+        <span class="browser-title">📂 Folder Browser</span>
+        <button class="btn-browser-nav" id="browserUpBtn" type="button" onclick="navigateBrowserUp()" title="Go to parent directory">⬆️ Up</button>
+      </div>
+      <div class="browser-current-path mono" id="browserCurrentPath">Select a drive or quick folder</div>
+      
+      <!-- Quick Picks: Drives & User Folders -->
+      <div class="browser-quick-bar" id="browserQuickBar"></div>
+
+      <!-- Subfolders List -->
+      <div class="browser-subfolder-list" id="browserSubfolders"></div>
+
+      <div class="browser-footer">
+        <button class="btn-use-folder" id="btnUseFolder" type="button" onclick="selectCurrentBrowserFolder()">✓ Use This Folder</button>
+      </div>
+    </div>
+
+    <div class="modal-feedback" id="dirsFeedback" style="margin: 0 18px 10px;"></div>
+
     <div class="modal-footer">
       <button class="btn-action secondary" onclick="closeDirectoriesModal()">Close</button>
     </div>
@@ -1320,15 +1756,35 @@
       <button class="modal-close" onclick="closeVaultModal()">✕</button>
     </div>
     <div class="modal-body">
-      <!-- Vault Storage Location Banner & Explorer Button -->
+      <!-- Vault Storage Location Banner & Action Buttons -->
       <div class="vault-info-banner">
         <div class="vault-path-box">
           <span class="vault-path-label">Storage Location:</span>
           <span class="vault-path-text mono" id="vaultDirPath">Loading vault path…</span>
         </div>
-        <button class="btn-open-vault" type="button" onclick="openVaultInExplorer()" title="Open quarantine vault folder in Windows File Explorer">
-          📂 Open in File Explorer
-        </button>
+        <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+          <button class="btn-open-vault" id="btnOpenVaultExplorer" type="button" onclick="openVaultInExplorer()" title="Open quarantine vault folder in Windows File Explorer">
+            📂 Open in Explorer
+          </button>
+          <button class="btn-open-vault" id="btnToggleVaultBrowser" type="button" onclick="toggleVaultBrowser()" title="Browse raw quarantined files directly inside the dashboard" style="background: rgba(255,255,255,0.06); border-color: var(--border);">
+            🔍 Browse Files
+          </button>
+          <button class="btn-open-vault" type="button" onclick="copyVaultPath()" title="Copy quarantine vault folder path to clipboard" style="background: rgba(255,255,255,0.06); border-color: var(--border);">
+            📋 Copy Path
+          </button>
+        </div>
+      </div>
+
+      <!-- Live Feedback Box for Explorer and Copy actions -->
+      <div id="vaultFeedback" style="display: none; padding: 7px 12px; font-size: 11.5px; border-radius: 4px; background: rgba(74, 222, 128, 0.12); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); margin-top: 4px;"></div>
+
+      <!-- In-App Quarantine File Browser Drawer -->
+      <div id="vaultBrowserPanel" class="browser-panel" style="display: none; margin: 4px 0 10px;">
+        <div class="browser-header">
+          <span class="browser-title">📂 Vault Files (Raw Storage)</span>
+          <span class="mono text-muted" style="font-size: 11px;" id="vaultBrowserCount">Scanning vault…</span>
+        </div>
+        <div class="browser-subfolder-list" id="vaultBrowserList" style="max-height: 180px;"></div>
       </div>
 
       <div class="modal-section-title" style="margin-top: 8px;">Quarantined File Records</div>

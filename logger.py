@@ -9,6 +9,7 @@ from __future__ import annotations   # PEP 563: compatible with Python 3.7+
 import json
 import os
 import sys
+import shutil
 from datetime import datetime, timedelta
 
 from colorama import Fore, Style, init as colorama_init
@@ -133,6 +134,7 @@ def load_logs(
     start_time: str = None,
     end_time: str = None,
     timeframe: str = None,
+    event_type: str = None,
 ) -> list[dict]:
     """
     Read and parse audit.log entries with multi-criteria filtering,
@@ -187,6 +189,10 @@ def load_logs(
 
                 # 2. Alert Level Filter
                 if level_filter and entry.get("alert_level") != level_filter:
+                    continue
+
+                # 2b. Event Action Filter (e.g. CREATED, MODIFIED, MOVED, DELETED, DOWNLOADED)
+                if event_type and entry.get("event_type", "").upper() != event_type.upper():
                     continue
 
                 # 3. File Type / Category Filter
@@ -309,6 +315,7 @@ def get_stats(
     timeframe: str = None,
     keyword: str = None,
     file_type: str = None,
+    event_type: str = None,
 ) -> dict:
     """Return summary statistics from the audit log, optionally filtered by timeframe/search."""
     entries = load_logs(
@@ -317,6 +324,7 @@ def get_stats(
         timeframe=timeframe,
         keyword=keyword,
         file_type=file_type,
+        event_type=event_type,
     )
     stats = {
         "total":              len(entries),
@@ -327,6 +335,30 @@ def get_stats(
         "integrity_ok":       sum(1 for e in entries if e.get("integrity_status") == "INTACT"),
     }
     return stats
+
+
+def clear_logs(archive: bool = True) -> dict:
+    """Clear or archive existing audit and alert logs to purge noise/flood events."""
+    try:
+        from config import ALERT_LOG_PATH
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if os.path.exists(AUDIT_LOG_PATH):
+            if archive:
+                arch_path = os.path.join(LOG_DIR, f"audit_{ts}.log.bak")
+                shutil.copy2(AUDIT_LOG_PATH, arch_path)
+            with open(AUDIT_LOG_PATH, "w", encoding="utf-8") as f:
+                pass
+
+        if os.path.exists(ALERT_LOG_PATH):
+            if archive:
+                arch_path = os.path.join(LOG_DIR, f"alerts_{ts}.log.bak")
+                shutil.copy2(ALERT_LOG_PATH, arch_path)
+            with open(ALERT_LOG_PATH, "w", encoding="utf-8") as f:
+                pass
+
+        return {"success": True, "message": "Logs successfully archived and reset."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def print_banner():

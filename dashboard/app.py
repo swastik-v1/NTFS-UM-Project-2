@@ -16,6 +16,7 @@ import alerter
 import db
 import process_tracker
 from monitor import get_active_monitor
+import config
 from config import DASHBOARD_HOST, DASHBOARD_PORT, DASHBOARD_DEBUG, LOGS_PER_PAGE, RESOURCE_DIR
 
 template_dir = os.path.join(RESOURCE_DIR, "dashboard", "templates")
@@ -55,6 +56,7 @@ def api_logs():
     start_time = request.args.get("start_time", "") or None
     end_time   = request.args.get("end_time", "") or None
     timeframe  = request.args.get("timeframe", "") or None
+    event_type = request.args.get("event_type", "").upper() or None
     page       = max(1, int(request.args.get("page", 1)))
 
     entries = logger.load_logs(
@@ -67,6 +69,7 @@ def api_logs():
         start_time=start_time,
         end_time=end_time,
         timeframe=timeframe,
+        event_type=event_type,
     )
     total = len(entries)
     start = (page - 1) * LOGS_PER_PAGE
@@ -86,19 +89,28 @@ def api_logs():
 
 @app.route("/api/stats")
 def api_stats():
-    """Return summary statistics filtered by timeframe/search."""
+    """Return summary statistics filtered by timeframe/search/event."""
     timeframe  = request.args.get("timeframe", "") or None
     start_time = request.args.get("start_time", "") or None
     end_time   = request.args.get("end_time", "") or None
     keyword    = request.args.get("keyword", "") or None
     file_type  = request.args.get("file_type", "") or None
+    event_type = request.args.get("event_type", "").upper() or None
     return jsonify(logger.get_stats(
         timeframe=timeframe,
         start_time=start_time,
         end_time=end_time,
         keyword=keyword,
         file_type=file_type,
+        event_type=event_type,
     ))
+
+
+@app.route("/api/logs/clear", methods=["POST"])
+def api_clear_logs():
+    """Archive and reset audit and alert logs to purge noise."""
+    res = logger.clear_logs(archive=True)
+    return jsonify(res)
 
 
 @app.route("/api/alerts")
@@ -160,6 +172,90 @@ def api_remove_directory():
     return jsonify({
         "success": ok,
         "message": f"Successfully removed '{path}' from monitoring." if ok else "Failed to remove directory."
+    })
+
+
+@app.route("/api/exclusions", methods=["GET"])
+def api_get_exclusions():
+    """Return all configured excluded directories, internal app paths, and processes."""
+    base_dir = os.path.normpath(os.path.abspath(config.BASE_DIR))
+    data_dir = os.path.normpath(os.path.abspath(os.path.join(base_dir, "data")))
+    vault_dir = os.path.normpath(os.path.abspath(db.QUARANTINE_DIR))
+    log_dir = os.path.normpath(os.path.abspath(config.LOG_DIR))
+    rep_dir = os.path.normpath(os.path.abspath(config.REPORT_DIR))
+
+    return jsonify({
+        "directories": db.get_excluded_directories(),
+        "processes": db.get_excluded_processes(),
+        "default_directory_keywords": config.DEFAULT_IGNORED_DIRECTORY_KEYWORDS,
+        "default_processes": config.DEFAULT_IGNORED_PROCESSES,
+        "system_exact_directories": [
+            ".git", "__pycache__", "node_modules", ".vscode", ".idea", ".pytest_cache"
+        ],
+        "internal_directories": [
+            {"name": "Application Root", "path": base_dir, "purpose": "App installation folder"},
+            {"name": "Database Storage", "path": data_dir, "purpose": "SQLite DB & hash baselines"},
+            {"name": "Quarantine Vault", "path": vault_dir, "purpose": "Isolated encrypted quarantine"},
+            {"name": "Audit Logs", "path": log_dir, "purpose": "audit.log and alerts.log"},
+            {"name": "Security Reports", "path": rep_dir, "purpose": "Incident & compliance reports"},
+        ],
+        "storm_suppression": {
+            "enabled": getattr(config, "STORM_SUPPRESSION_ENABLED", True),
+            "threshold": getattr(config, "STORM_BURST_THRESHOLD", 25),
+            "window_seconds": getattr(config, "STORM_WINDOW_SECONDS", 2.0),
+        }
+    })
+
+
+@app.route("/api/exclusions/directory/add", methods=["POST"])
+def api_add_excluded_directory():
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or data.get("directory") or "").strip()
+    if not path:
+        return jsonify({"success": False, "error": "Missing directory path."}), 400
+    ok = db.add_excluded_directory(path)
+    return jsonify({
+        "success": ok,
+        "message": f"Successfully excluded '{path}' from monitoring." if ok else "Failed to add exclusion."
+    })
+
+
+@app.route("/api/exclusions/directory/remove", methods=["POST"])
+def api_remove_excluded_directory():
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or data.get("directory") or "").strip()
+    if not path:
+        return jsonify({"success": False, "error": "Missing directory path."}), 400
+    ok = db.remove_excluded_directory(path)
+    return jsonify({
+        "success": ok,
+        "message": f"Successfully removed exclusion for '{path}'." if ok else "Failed to remove exclusion."
+    })
+
+
+@app.route("/api/exclusions/process/add", methods=["POST"])
+def api_add_excluded_process():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or data.get("process") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "Missing process name."}), 400
+    ok = db.add_excluded_process(name)
+    return jsonify({
+        "success": ok,
+        "message": f"Successfully added '{name}' to ignored processes." if ok else "Failed to add process exclusion."
+    })
+
+
+@app.route("/api/exclusions/process/remove", methods=["POST"])
+def api_remove_excluded_process():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or data.get("process") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "Missing process name."}), 400
+    ok = db.remove_excluded_process(name)
+    return jsonify({
+        "success": ok,
+        "message": f"Successfully removed '{name}' from ignored processes." if ok else "Failed to remove process exclusion."
     })
 
 
@@ -313,12 +409,26 @@ def api_restore_quarantine():
 
 @app.route("/api/quarantine/open-folder", methods=["POST"])
 def api_open_quarantine_folder():
-    """Open the quarantine vault folder in Windows Explorer."""
+    """Open the quarantine vault folder in Windows Explorer and return verified status."""
     try:
+        norm_dir = os.path.normpath(os.path.abspath(db.QUARANTINE_DIR))
+        os.makedirs(norm_dir, exist_ok=True)
         if sys.platform == "win32":
-            os.startfile(db.QUARANTINE_DIR)
-            return jsonify({"success": True})
-        return jsonify({"success": False, "error": "Folder viewing is only supported on Windows."})
+            opened = False
+            try:
+                os.startfile(norm_dir)
+                opened = True
+            except Exception:
+                pass
+            if not opened:
+                import subprocess
+                subprocess.Popen(f'explorer.exe "{norm_dir}"', shell=True)
+            return jsonify({
+                "success": True,
+                "path": norm_dir,
+                "message": f"Opened quarantine folder in Windows Explorer: {norm_dir}"
+            })
+        return jsonify({"success": False, "error": "Folder viewing in native explorer is only supported on Windows."})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 

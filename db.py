@@ -48,6 +48,20 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS excluded_directories (
+                path TEXT PRIMARY KEY,
+                added_at REAL NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS excluded_processes (
+                name TEXT PRIMARY KEY,
+                added_at REAL NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS allowlist (
                 entry TEXT PRIMARY KEY,
                 entry_type TEXT NOT NULL,
@@ -152,6 +166,72 @@ def remove_monitored_directory(path: str) -> bool:
     norm = os.path.normpath(os.path.abspath(path))
     with _db_lock, _get_connection() as conn:
         conn.execute("DELETE FROM monitored_directories WHERE path = ?", (norm,))
+        conn.commit()
+    return True
+
+
+# ── Excluded Directories & Processes Functions ──────────────────────────────
+
+def get_excluded_directories() -> list[str]:
+    with _db_lock, _get_connection() as conn:
+        rows = conn.execute(
+            "SELECT path FROM excluded_directories WHERE is_active = 1 ORDER BY path ASC"
+        ).fetchall()
+        return [r["path"] for r in rows]
+
+
+def add_excluded_directory(path: str) -> bool:
+    if not path:
+        return False
+    norm = os.path.normpath(os.path.abspath(path))
+    with _db_lock, _get_connection() as conn:
+        conn.execute("""
+            INSERT INTO excluded_directories (path, added_at, is_active)
+            VALUES (?, ?, 1)
+            ON CONFLICT(path) DO UPDATE SET is_active = 1
+        """, (norm, time.time()))
+        conn.commit()
+    return True
+
+
+def remove_excluded_directory(path: str) -> bool:
+    if not path:
+        return False
+    norm = os.path.normpath(os.path.abspath(path))
+    with _db_lock, _get_connection() as conn:
+        conn.execute("DELETE FROM excluded_directories WHERE path = ?", (norm,))
+        conn.commit()
+    return True
+
+
+def get_excluded_processes() -> list[str]:
+    with _db_lock, _get_connection() as conn:
+        rows = conn.execute(
+            "SELECT name FROM excluded_processes WHERE is_active = 1 ORDER BY name ASC"
+        ).fetchall()
+        return [r["name"] for r in rows]
+
+
+def add_excluded_process(name: str) -> bool:
+    if not name:
+        return False
+    proc = name.strip().lower()
+    with _db_lock, _get_connection() as conn:
+        conn.execute("""
+            INSERT INTO excluded_processes (name, added_at, is_active)
+            VALUES (?, ?, 1)
+            ON CONFLICT(name) DO UPDATE SET is_active = 1
+        """, (proc, time.time()))
+        conn.commit()
+    return True
+
+
+def remove_excluded_process(name: str) -> bool:
+    if not name:
+        return False
+    proc = name.strip().lower()
+    with _db_lock, _get_connection() as conn:
+        conn.execute("DELETE FROM excluded_processes WHERE name = ?", (proc,))
         conn.commit()
     return True
 

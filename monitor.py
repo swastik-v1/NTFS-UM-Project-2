@@ -22,6 +22,7 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+import config
 from config import (
     MONITORED_DIRECTORIES,
     ENABLE_PROCESS_TRACKING,
@@ -30,6 +31,8 @@ from config import (
     REPORT_DIR,
     IGNORED_EXTENSIONS,
     IGNORED_FILENAMES,
+    IGNORED_DIRECTORY_KEYWORDS,
+    IGNORED_GAME_PROCESSES,
     get_auto_discovered_targets,
 )
 import hasher
@@ -46,9 +49,93 @@ import dlp_scanner
 _LOG_DIR_NORM = os.path.normcase(os.path.normpath(os.path.abspath(LOG_DIR)))
 _REPORT_DIR_NORM = os.path.normcase(os.path.normpath(os.path.abspath(REPORT_DIR)))
 _BASE_DIR_NORM = os.path.normcase(os.path.normpath(os.path.abspath(BASE_DIR)))
+_DATA_DIR_NORM = os.path.normcase(os.path.normpath(os.path.abspath(os.path.join(BASE_DIR, "data"))))
+_VAULT_DIR_NORM = os.path.normcase(os.path.normpath(os.path.abspath(os.path.join(BASE_DIR, "vault"))))
 
 _IGNORED_EXTS_SET = frozenset(ext.lower() for ext in IGNORED_EXTENSIONS)
 _IGNORED_NAMES_SET = frozenset(name.lower() for name in IGNORED_FILENAMES)
+_IGNORED_DIR_KEYWORDS_LOWER = tuple(k.lower() for k in IGNORED_DIRECTORY_KEYWORDS)
+_IGNORED_PROCESSES_SET = frozenset(p.lower() for p in IGNORED_GAME_PROCESSES)
+
+
+def _get_dynamic_excluded_dirs() -> set[str]:
+    """Retrieve normalized user/admin excluded directory paths from SQLite."""
+    try:
+        return set(os.path.normcase(os.path.normpath(p)) for p in db.get_excluded_directories())
+    except Exception:
+        return set()
+
+
+def _get_dynamic_excluded_processes() -> set[str]:
+    """Retrieve user/admin excluded process names from SQLite and config defaults."""
+    try:
+        db_procs = set(p.lower() for p in db.get_excluded_processes())
+    except Exception:
+        db_procs = set()
+    return db_procs | _IGNORED_PROCESSES_SET
+
+
+# =============================================================================
+# ADAPTIVE EVENT STORM SUPPRESSOR (Enterprise Multi-System Rate Limiter)
+# =============================================================================
+class AdaptiveStormSuppressor:
+    """
+    Enterprise-grade burst rate-limiter and event storm suppressor.
+    Tracks non-sensitive write frequencies per directory or process bucket.
+    If frequency exceeds `threshold` within `window_sec`, subsequent non-sensitive
+    events for that bucket are suppressed for `cooldown_sec`.
+
+    CRITICAL SECURITY GUARANTEE:
+    Sensitive files (.docx, .xlsx, .pem, .key, .sql, .env, DLP findings, USB/network transfers)
+    NEVER get suppressed. They bypass rate-limiting unconditionally.
+    """
+    def __init__(self, threshold: int = 25, window_sec: float = 2.0, cooldown_sec: float = 8.0):
+        self.threshold = threshold
+        self.window_sec = window_sec
+        self.cooldown_sec = cooldown_sec
+        self._history: dict[str, list[float]] = {}
+        self._suppressed_until: dict[str, float] = {}
+        self._suppressed_counts: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def should_suppress(self, bucket_key: str, is_sensitive: bool = False) -> tuple[bool, int]:
+        """
+        Returns (is_suppressed, total_suppressed_count).
+        Sensitive events always return (False, 0).
+        """
+        if is_sensitive or not bucket_key:
+            return False, 0
+
+        now = time.time()
+        with self._lock:
+            # Check if currently in cooldown
+            expiry = self._suppressed_until.get(bucket_key, 0.0)
+            if now < expiry:
+                self._suppressed_counts[bucket_key] = self._suppressed_counts.get(bucket_key, 0) + 1
+                return True, 0
+
+            # Cooldown expired or not active: clean old timestamps
+            timestamps = self._history.get(bucket_key, [])
+            cutoff = now - self.window_sec
+            timestamps = [t for t in timestamps if t > cutoff]
+            timestamps.append(now)
+            self._history[bucket_key] = timestamps
+
+            # Check if threshold breached
+            if len(timestamps) >= self.threshold:
+                self._suppressed_until[bucket_key] = now + self.cooldown_sec
+                prior_count = self._suppressed_counts.get(bucket_key, 0)
+                self._suppressed_counts[bucket_key] = 1
+                return True, prior_count
+
+            return False, 0
+
+
+_storm_suppressor = AdaptiveStormSuppressor(
+    threshold=getattr(config, "STORM_BURST_THRESHOLD", 25),
+    window_sec=getattr(config, "STORM_WINDOW_SECONDS", 2.0),
+    cooldown_sec=getattr(config, "STORM_COOLDOWN_SECONDS", 8.0),
+)
 
 # Debounce & Burst Filtering
 _DEBOUNCE_WINDOW = 0.8         # Seconds to absorb OS chunked write-buffer flushes
@@ -64,11 +151,28 @@ _pending_delete_timers: dict[str, threading.Timer] = {}           # basename -> 
 _debounce_lock = threading.Lock()
 
 
+def _should_ignore_dir_name(dir_name: str, full_path: str = "") -> bool:
+    """Return True if a directory name or path matches noise, build, or user exclusions."""
+    d_lower = dir_name.lower()
+    if d_lower in {".git", "__pycache__", "node_modules", ".vscode", ".idea", "data", "vault", "logs", "reports", "build", "dist", "tools", ".pytest_cache"}:
+        return True
+    for kw in _IGNORED_DIR_KEYWORDS_LOWER:
+        if kw in d_lower:
+            return True
+    if full_path:
+        norm_fp = os.path.normcase(os.path.normpath(full_path))
+        for exc in _get_dynamic_excluded_dirs():
+            if norm_fp == exc or norm_fp.startswith(exc + os.sep):
+                return True
+    return False
+
+
 def _should_ignore_path(path: str) -> bool:
     """
     Return True if the file should be ignored:
-      - Internal application folders (logs/, reports/, build/, dist/, .git/)
+      - Internal application folders (logs/, reports/, data/, vault/, build/, dist/, .git/)
       - Zero-length system/lock files (desktop.ini, thumbs.db)
+      - Game directories and high-frequency asset stream caches (Games TG, Hollow Knight, Unity _Data)
       - Temporary non-sensitive download fragments
     Does NOT drop files with sensitive double extensions (secret.pem.tmp).
     Does NOT ignore sibling folders (Downloads2) or .github folders.
@@ -83,26 +187,46 @@ def _should_ignore_path(path: str) -> bool:
         return True
     if norm == _REPORT_DIR_NORM or norm.startswith(_REPORT_DIR_NORM + os.sep):
         return True
+    if norm == _DATA_DIR_NORM or norm.startswith(_DATA_DIR_NORM + os.sep):
+        return True
+    if norm == _VAULT_DIR_NORM or norm.startswith(_VAULT_DIR_NORM + os.sep):
+        return True
+
+    # Check user/admin configured custom excluded directories
+    for exc in _get_dynamic_excluded_dirs():
+        if norm == exc or norm.startswith(exc + os.sep):
+            return True
 
     # Check internal build/dist folders only if inside application base
     if norm == _BASE_DIR_NORM or norm.startswith(_BASE_DIR_NORM + os.sep):
         rel = os.path.relpath(norm, _BASE_DIR_NORM).replace("/", "\\")
         top_segment = rel.split("\\")[0].lower()
-        if top_segment in {"build", "dist", "tools", "__pycache__", ".pytest_cache"}:
+        if top_segment in {"data", "vault", "logs", "reports", "build", "dist", "tools", "__pycache__", ".pytest_cache"}:
             return True
-
-    # 2. Version control and package directories (exact path segment matching)
-    parts = [p.lower() for p in norm.replace("/", "\\").split("\\") if p]
-    if any(p in {".git", "__pycache__", "node_modules", ".vscode"} for p in parts):
-        return True
 
     basename = os.path.basename(norm).lower()
 
-    # 3. System metadata files
+    # Never monitor FileSentinel's own database files
+    if basename.startswith("filesentinel.db"):
+        return True
+
+    # 2. Version control and package directories (exact path segment matching)
+    parts = [p.lower() for p in norm.replace("/", "\\").split("\\") if p]
+    if any(p in {".git", "__pycache__", "node_modules", ".vscode", ".idea"} for p in parts):
+        return True
+
+    # 3. Standard vendor-neutral directory keywords (e.g. SteamLibrary, shadercache)
+    dir_parts = parts[:-1] if len(parts) > 1 else parts
+    for p in dir_parts:
+        for kw in _IGNORED_DIR_KEYWORDS_LOWER:
+            if kw in p:
+                return True
+
+    # 4. System metadata files
     if basename in _IGNORED_NAMES_SET:
         return True
 
-    # 4. Office lock files (~$)
+    # 6. Office lock files (~$)
     if basename.startswith("~$") or basename.startswith(".~"):
         try:
             if os.path.exists(path) and os.path.getsize(path) > 1024:
@@ -111,7 +235,7 @@ def _should_ignore_path(path: str) -> bool:
             pass
         return True
 
-    # 5. Temporary download extensions
+    # 7. Temporary download & game patch extensions
     _, ext = os.path.splitext(norm)
     if ext.lower() in _IGNORED_EXTS_SET:
         # Double extension check: if stem has a sensitive extension, DO NOT drop!
@@ -244,11 +368,25 @@ class SecureTransferEventHandler(FileSystemEventHandler):
         if _is_burst_duplicate(event_type, target_path):
             return
 
+        is_sensitive = detector.is_sensitive_file(target_path)
+
+        # Adaptive Event Storm Suppressor (Suppresses high-frequency write storms from any background app/game)
+        if getattr(config, "STORM_SUPPRESSION_ENABLED", True):
+            parent_dir = os.path.dirname(os.path.normcase(os.path.normpath(target_path)))
+            suppressed, prior_count = _storm_suppressor.should_suppress(parent_dir, is_sensitive=is_sensitive)
+            if suppressed:
+                return
+
         user = _get_current_user()
 
         # Step 2: Accurate Handle-to-Process Attribution & Lineage (Restart Manager)
         telemetry = process_tracker.get_process_telemetry(target_path)
         process = telemetry["name"]
+
+        # Filter out user/admin configured excluded processes (if file is non-sensitive)
+        excluded_procs = _get_dynamic_excluded_processes()
+        if process and process.lower() in excluded_procs and not is_sensitive:
+            return
 
         # Step 3: Check Alternate Data Stream for Internet DOWNLOADED event
         download_info = {}
@@ -503,7 +641,9 @@ class FileMonitor:
                 expanded = os.path.expandvars(d)
                 if not os.path.isdir(expanded):
                     continue
-                for root, _, files in os.walk(expanded):
+                for root, dirs, files in os.walk(expanded):
+                    # Prune noisy game/cache/internal directories in place so os.walk does not traverse them
+                    dirs[:] = [d_sub for d_sub in dirs if not _should_ignore_dir_name(d_sub, os.path.join(root, d_sub))]
                     if _should_ignore_path(root):
                         continue
                     for f in files:

@@ -1,0 +1,18 @@
+{
+  "description": "FileSentinel DLP Enterprise Configuration Override File",
+  "version": "2.0.0",
+  "monitored_directories": [
+    "%USERPROFILE%\\Desktop",
+    "%USERPROFILE%\\Documents",
+    "%USERPROFILE%\\Downloads"
+  ],
+  "excluded_directories": [],
+  "excluded_processes": [],
+  "storm_suppression": {
+    "enabled": true,
+    "burst_threshold_events": 25,
+    "window_seconds": 2.0,
+    "cooldown_seconds": 8.0
+  },
+  "notes": "Custom excluded directories and processes can also be managed dynamically via the Web UI in Folders & Exclusions."
+}
