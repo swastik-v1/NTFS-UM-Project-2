@@ -3,7 +3,7 @@
   <Product Id="*"
            Name="FileSentinel DLP"
            Language="1033"
-           Version="1.0.0"
+           Version="2.0.1"
            Manufacturer="FileSentinel Security"
            UpgradeCode="B9F74C82-1D5B-4C95-8F32-843B80E2AC7E">
 
