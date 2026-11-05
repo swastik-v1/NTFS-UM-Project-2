@@ -9,54 +9,79 @@ A Python-based Blue Team security tool designed to monitor filesystem activity i
 
 ## 🎯 Objectives & Capabilities
 
-- **Real-Time Filesystem Monitoring:** Tracks `CREATED`, `MODIFIED`, `MOVED`, and `DELETED` file events across configured target directories.
+- **Real-Time Filesystem Monitoring:** Tracks `CREATED`, `MODIFIED`, `MOVED`, `DELETED`, and `DOWNLOADED` file events across configured target directories.
 - **Unauthorized Movement & Exfiltration Detection:**
   - Maintains strict policy lists of sensitive directories and high-risk file types.
-  - Detects suspicious outbound transfer vectors (USB / removable media, UNC network shares, cloud storage sync folders).
+  - Detects suspicious outbound transfer vectors (USB / removable media discovered dynamically via Win32 drive bitmasks, UNC network shares, cloud storage sync folders).
 - **Cryptographic File Integrity Verification:**
-  - Computes pre- and post-transfer hash digests (SHA-256 / SHA-512 / MD5) using Python's built-in `hashlib`.
+  - Computes pre- and post-transfer chunked hash digests (SHA-256 / SHA-512 / MD5) using Python's built-in `hashlib`.
+  - Backed by an ACID-compliant SQLite baseline hash registry (`data/filesentinel.db`) that persists across system reboots.
   - Flags tampering, corruption, or unexpected content alterations (`INTACT` vs `TAMPERED`).
-- **Telemetry, Alerting & Audit Logging:**
-  - 3-tier severity classification: `INFO`, `WARNING`, `CRITICAL`.
-  - Structured, machine-readable JSON-line audit logs in `logs/audit.log`.
-  - Real-time terminal alerts via `colorama` with high-visibility banners for policy violations.
+- **Differential Forensics & Content Tracking:**
+  - Generates line-by-line unified text diffs (`+`, `-`) and binary byte deltas for modified files.
+  - Visualized directly inside the incident inspection drawer.
+- **NTFS Alternate Data Stream (ADS) Forensics:**
+  - Inspects `:Zone.Identifier` alternate streams on NTFS drives.
+  - Automatically classifies web downloads as `DOWNLOADED` events and extracts origin host URLs and referrer URLs.
+- **True DLP Content Inspection Engine:**
+  - High-performance regex scanning with algorithmic validation.
+  - Identifies confidential data in file contents: PCI-DSS payment cards (with Luhn checksum validation), US Social Security Numbers (SSN), AWS/GCP cloud credentials, RSA private keys, and API tokens.
+- **Handle-to-Process Attribution & Lineage:**
+  - Direct integration with the **Windows Restart Manager API** (`rstrtmgr.dll`) to identify which process locked or modified a file.
+  - Tracks process name, PID, user, command-line arguments, and ancestral process trees (`explorer.exe -> cmd.exe -> script.py`).
+- **Composite 0–100 Risk Scoring Matrix:**
+  - Dynamic heuristic scoring combining transfer vectors, tampering, DLP sensitivity, and process lineage into `INFO`, `WARNING`, and `CRITICAL` alert levels.
+- **One-Click Active Remediation:**
+  - Isolated Quarantine Vault (`vault/quarantine/`): strips execute permissions, renames files to `.quarantine`, and provides one-click restoration.
+  - Native Windows File Explorer integration, in-app file browser, and one-click process termination.
+- **Universal Adaptive Event Storm Suppression:**
+  - Token-bucket rate limiter that automatically throttles high-frequency non-sensitive write bursts (> 25 writes in 2 seconds) from games, compilers, and updaters, preventing OS buffer starvation (`ReadDirectoryChangesW`).
+  - **Zero-Blindspot Guarantee:** Sensitive documents, secrets, and DLP findings always bypass rate-limiting unconditionally.
+- **Scope & Exclusions Management:**
+  - Web UI modal with interactive directory tree browser to add/remove monitored folders, configure custom excluded directories, and manage ignored background processes.
 - **Native Windows Desktop Application:**
   - Runs inside a dedicated native desktop window (powered by `pywebview`).
   - **System Tray Icon (`pystray`):** Runs continuously in the background near the clock; closing the window minimizes to the tray.
   - **Native Toast Notifications:** Displays Windows slide-in alert notifications for `WARNING` and `CRITICAL` events.
   - Right-click tray menu to open dashboard, pause/resume monitoring, or export audit reports.
 - **SPLUNK-Style Local Dashboard with Vertical Chat Reports:**
-  - Local Flask web UI (`http://127.0.0.1:5000`) with auto-refreshing telemetry, searchable/filterable logs, and live alert feeds.
-  - **Interactive Incident Chat Drawer:** Clicking any log event row opens a vertical report in chat block form (System alert, Telemetry breakdown, SHA-256 hash inspection, and SOC blue-team advice).
+  - Local Flask web UI (`http://127.0.0.1:5000`) with auto-refreshing telemetry, multi-criteria filtering, timeframe presets (`1h`, `24h`, `7d`, `custom`), and smart token queries (`user:admin ext:pem risk:>70`).
+  - **Interactive Incident Chat Drawer:** Clicking any log event row opens a vertical report in chat block form (System alert, Telemetry breakdown, Process lineage, NTFS origin, DLP findings, SHA-256 diff, and SOC blue-team advice).
   - Zero external network dependencies (100% localhost).
 - **Standalone `.exe` & Windows `.msi` Installer:**
   - Compiled portable executable `FileSentinel.exe` (run directly with zero Python installation required).
   - Official Windows Installer `FileSentinel-Setup.msi` with desktop/start menu shortcuts and clean uninstallation.
-- **Noise Suppression & Write-Burst Debouncing:**
-  - Eliminates duplicate operating system write-buffer flushes during large file transfers.
-  - Prevents recursive log feedback loops.
 
 ---
 
 ## 🏗️ Architecture & Workflow
 
 ```
-[ Filesystem Event ] (watchdog)
+[ Filesystem Event ] (watchdog / ReadDirectoryChangesW)
         │
         ▼
-[ Noise & Internal Filter ] ──> Ignore own logs, .git, OS metadata (~$*, .tmp, desktop.ini)
+[ Self-Isolation Filter ] ───> Ignore own database, logs, vault, reports, and .git
         │
         ▼
-[ Write-Burst Debounce ] ────> Suppress rapid OS buffer flushes within debounce window
+[ Write-Burst Debounce ] ────> Suppress rapid OS buffer flushes within debounce window (0.8s)
         │
         ▼
-[ Event Classification ] ────> Check Sensitive Extensions / Directories & Suspicious Destinations
-        │                       ├── CRITICAL: Sensitive file moved to USB/Cloud/Network or Deleted
-        │                       ├── WARNING : Sensitive file Created/Modified
-        │                       └── INFO    : Normal file activity
+[ Adaptive Storm Suppressor ]> Auto-throttle non-sensitive bursts (>25 writes/2s)
+        │                      (Sensitive files unconditionally bypass throttling)
+        ▼
+[ Event Classification ] ────> Destination Vector (USB Bitmask / Cloud / UNC Shares)
+        │                      NTFS Alternate Data Streams (:Zone.Identifier download origin)
+        │                      True DLP Content Inspection (PCI Cards with Luhn, SSN, API Keys)
         │
         ▼
-[ Integrity Hashing ] ───────> Compute SHA-256 (pre/post transfer comparison)
+[ Process Attribution ] ─────> Windows Restart Manager (rstrtmgr.dll) + Lineage Tree
+        │
+        ▼
+[ Integrity Hashing ] ───────> SHA-256 chunked hashing & SQLite baseline check (INTACT / TAMPERED)
+        │                      Text & binary diff tracking (+ / - snippet)
+        │
+        ▼
+[ Composite Risk Scoring ] ──> 0-100 Heuristic Matrix (INFO: 0-39 | WARNING: 40-69 | CRITICAL: 70-100)
         │
         ├───> [ Structured Logger ] ───> logs/audit.log (JSON Lines) + Console
         ├───> [ Alerter ] ─────────────> logs/alerts.log + Terminal Banner
@@ -69,12 +94,17 @@ A Python-based Blue Team security tool designed to monitor filesystem activity i
 ## 📁 Project Structure
 
 ```
-├── config.py                 # Central configuration (monitored paths, policies, thresholds)
-├── monitor.py                # Watchdog filesystem observer & debouncing pipeline
-├── detector.py               # Classification logic for sensitive files and exfiltration paths
-├── hasher.py                 # Cryptographic hashing & pre/post transfer integrity verification
-├── logger.py                 # Structured JSON audit logging & console output
-├── alerter.py                # Policy violation alerting & native notification dispatcher
+├── config.py                 # Central configuration (policies, thresholds, and defaults)
+├── config.json               # Enterprise deployment policy override file
+├── db.py                     # SQLite engine (baselines, exclusions, quarantine vault)
+├── monitor.py                # Watchdog observer, debouncing & adaptive storm suppressor
+├── detector.py               # Exfiltration classification, risk matrix & NTFS ADS extraction
+├── dlp_scanner.py            # DLP content inspection (PCI credit cards, SSNs, API tokens)
+├── process_tracker.py        # Windows Restart Manager API handle & lineage attribution
+├── hasher.py                 # Cryptographic chunked hashing & baseline integrity engine
+├── diff_tracker.py           # Unified text diff snippets and binary delta tracker
+├── logger.py                 # Structured JSONL audit logging & multi-criteria filtering
+├── alerter.py                # Policy violation alerting & native toast dispatcher
 ├── reporter.py               # Automated audit report generator
 ├── main.py                   # Central CLI and desktop app launcher
 ├── app_desktop.py            # Native Windows Desktop App with System Tray & Toasts
@@ -82,12 +112,15 @@ A Python-based Blue Team security tool designed to monitor filesystem activity i
 ├── assets/                   # Application icons (icon.png, icon.ico)
 ├── installer/
 │   ├── FileSentinel.wxs      # WiX Toolset Windows Installer definition
+│   ├── version_info.txt      # Windows PE version resource metadata
 │   └── license.rtf           # EULA license displayed in MSI setup wizard
 ├── dist/                     # Compiled binaries (FileSentinel.exe, FileSentinel-Setup.msi)
 ├── dashboard/
 │   ├── app.py                # Local Flask server providing REST API endpoints
 │   ├── templates/index.html  # SPLUNK-inspired dashboard UI with vertical chat drawer
 │   └── static/style.css      # Dark-mode dashboard stylesheet
+├── data/                     # SQLite database (filesentinel.db)
+├── vault/                    # Quarantine vault storage (vault/quarantine/)
 ├── logs/                     # Audit & alert logs (audit.log, alerts.log)
 ├── reports/                  # Generated summary and violation reports
 ├── tests/                    # Automated test suite (73 unit & integration tests)
@@ -123,7 +156,7 @@ This script handles dependency verification, PyInstaller frozen bundling, portab
 ## 🚀 Python Source Installation & Setup
 
 ### Prerequisites
-- Python 3.9+ (Python 3.10+ recommended)
+- Python 3.10+ (tested through Python 3.13 on Windows 11)
 - Standard pip package manager
 
 ### Setup
@@ -201,7 +234,7 @@ Stop-Process -Name FileSentinel, python -Force -ErrorAction SilentlyContinue
 
 ## 🧪 Testing
 
-Run the automated test suite (43 unit & integration tests):
+Run the automated test suite (73 unit & integration tests):
 ```bash
 python -m pytest tests -v
 ```
@@ -211,7 +244,9 @@ python -m pytest tests -v
 
 ## 🛡️ Blue Team Security Techniques Implemented (A bit extra stuff)
 
-- **Data Loss Prevention (DLP):** Tracks unauthorized movement of corporate and confidential file types to external endpoints.
-- **Tamper Detection:** Computes cryptographic pre/post hashes to verify that transferred files have not been modified or corrupted in transit.
-- **Insider Threat Monitoring:** Captures operating system username and triggering process metadata for every file transfer event.
+- **Data Loss Prevention (DLP):** High-speed regex scanning with Luhn checksum validation for payment cards, SSNs, and cloud secrets.
+- **Tamper & Differential Detection:** Computes cryptographic pre/post hashes to verify that transferred files have not been modified or corrupted in transit, accompanied by line-by-line unified diff tracking.
+- **Kernel Handle & Process Attribution:** Direct integration with the Windows Restart Manager API (`rstrtmgr.dll`) captures operating system username, executable path, command line, and ancestor process lineage trees.
+- **NTFS Alternate Data Stream Analysis:** Inspects `:Zone.Identifier` on downloaded files to identify web origin host URLs and referrer URLs.
+- **Active Remediation Vault:** Isolates flagged files into a restricted quarantine vault with one-click restore capabilities.
 - **Air-Gapped & Offline Ready:** Built completely self-contained with no external cloud API dependencies.
